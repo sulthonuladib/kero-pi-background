@@ -1,6 +1,6 @@
 # kero-pi-background
 
-A [Pi](https://pi.dev) extension that runs jobs in [Kero](https://kero.app) panes and **wakes the agent with a message when they finish**, instead of holding a turn open on `kero wait`.
+A [Pi](https://pi.dev) extension that runs jobs in [Kero](https://kero.sh) ([egoist/kero](https://github.com/egoist/kero)) panes and **wakes the agent with a message when they finish**, instead of holding a turn open on `kero wait`.
 
 ```text
 kero_bg {command: "pnpm test"}      → "Started in pane k3f9a. End your turn."
@@ -84,3 +84,8 @@ A pane that disappears or a job killed by a signal is reported as `lost` / `ende
 ## License
 
 MIT
+
+## Links
+
+- Kero: <https://kero.sh> · <https://github.com/egoist/kero>
+- Pi: <https://pi.dev>
