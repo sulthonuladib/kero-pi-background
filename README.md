@@ -3,7 +3,7 @@
 A [Pi](https://pi.dev) extension that runs jobs in [Kero](https://kero.sh) ([egoist/kero](https://github.com/egoist/kero)) panes and **wakes the agent with a message when they finish**, instead of holding a turn open on `kero wait`.
 
 ```text
-kero_bg {command: "pnpm test"}      → "Started in pane k3f9a. End your turn."
+kero_bg {command: "pnpm test"}      → "Started in session k3f9a. End your turn."
                                       … agent stops …
                                       [kero-background] pane k3f9a succeeded
                                       Last screen: 42 passed
@@ -44,14 +44,14 @@ That is the whole mechanism — no wrapper around `bash`, no interception. `bash
 
 ### `kero_bg`
 
-Start a command in a background Kero pane and return at once.
+Start a command in its own background Kero session and return at once. Each job gets a session of its own, so the session you are working in stays one agent doing one thing; pass `split: true` to put a job beside the current pane instead.
 
 | Param | Meaning |
 | --- | --- |
 | `command` | Shell command to run |
 | `dir` | Working directory (default: current) |
-| `session` | Start a new session instead of splitting beside this pane |
-| `name` | Session name (with `session: true`) |
+| `name` | Session name (default: the command's first word, e.g. `pnpm`) |
+| `split` | Run in a pane beside this one instead of its own session |
 | `timeout` | Stop watching after this long, Kero syntax (default `24h`) |
 
 You are messaged with the exit status and the last 20 lines of the pane when the command ends.

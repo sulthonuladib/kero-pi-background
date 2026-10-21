@@ -20,11 +20,13 @@ const TAIL_LINES = 20;
 const TAIL_CHARS = 2000;
 
 /** Prompt section that makes backgrounding the default, not a memorised habit. */
-const DEFAULT_SECTION = `Long work belongs in a Kero pane. A bash call that blocks is a stall: the turn cannot end and nothing else can happen.
+const DEFAULT_SECTION = `Long work belongs in its own Kero session, not in a bash call that blocks the turn.
 
 - Use kero_bg for anything that may take more than a few seconds: test suites, builds, installs and package managers, docker, database migrations, tarballs, servers and watchers, batch scripts, and any command whose duration you do not know.
+- Each job gets its own session, so the current session stays one agent doing one thing. Pass split=true only when you deliberately want the job beside this pane.
 - Prefer a single kero_bg call to splitting one long job across several bash calls.
-- After kero_bg returns, say what is running (pane id and command) in one line, then end the turn. Do not sleep, poll, re-read the pane, or call kero wait: the job's exit status and last screen arrive as a message that starts your next turn.
+- After kero_bg returns, say what is running (session id and command) in one line, then end the turn. Do not sleep, poll, re-read the pane, or call kero wait: the job's exit status and last screen arrive as a message that starts your next turn.
+- Close the session with kero close once you have read what you need from it.
 - Use bash only for commands you expect to take seconds: reads, greps, git status and commits, formatters, short scripts.
 - Use kero_watch when the work already runs in a pane you did not start; mode "agent" fires when that agent stops working even if its own job keeps running.`;
 
@@ -60,6 +62,14 @@ function tail(text: string, lines = TAIL_LINES, chars = TAIL_CHARS): string {
 /** The last line of `kero` output is the id it prints. */
 function lastLine(out: string): string {
 	return out.trim().split("\n").pop()?.trim() ?? "";
+}
+
+/** A readable session name from the first word of the command: "pnpm test" → "pnpm". */
+function commandName(command: string): string | undefined {
+	const first = command.trim().split(/\s+/)[0] ?? "";
+	const base = first.split("/").pop() ?? "";
+	if (!/^[A-Za-z0-9][\w.+-]{0,23}$/.test(base)) return undefined;
+	return base;
 }
 
 export default function keroBackground(pi: ExtensionAPI) {
@@ -119,25 +129,28 @@ export default function keroBackground(pi: ExtensionAPI) {
 		name: "kero_bg",
 		label: "Kero Background Job",
 		description:
-			"Run a shell command in a background Kero pane and return at once. When the command exits you are sent a message with its exit status and last screen, so you can end your turn now and continue then.",
-		promptSnippet: "Run a long command in a Kero pane; you are messaged when it ends",
+			"Run a shell command in its own background Kero session and return at once. When the command exits you are sent a message with its exit status and last screen, so you can end your turn now and continue then.",
+		promptSnippet: "Run a long command in its own Kero session; you are messaged when it ends",
 		promptGuidelines: [
 			"Use kero_bg instead of bash for builds, tests, installs, migrations, servers, and any command of unknown duration; then end the turn instead of waiting.",
 		],
 		parameters: Type.Object({
 			command: Type.String({ description: "Shell command to run" }),
-			name: Type.Optional(Type.String({ description: "Session name (with session=true)" })),
+			name: Type.Optional(Type.String({ description: "Session name (default: the command's first word)" })),
 			dir: Type.Optional(Type.String({ description: "Working directory (default: current)" })),
-			session: Type.Optional(
-				Type.Boolean({ description: "Start a new session instead of a pane beside this one" }),
+			split: Type.Optional(
+				Type.Boolean({
+					description: "Run in a pane beside this one instead of its own session (the default)",
+				}),
 			),
 			timeout: Type.Optional(
 				Type.String({ description: "Stop watching after this long (kero syntax, e.g. 2h); default none" }),
 			),
 		}),
 		async execute(_id, params) {
-			const args = params.session ? ["new"] : ["split", "--down"];
-			if (params.name) args.push("-n", params.name);
+			const args = params.split ? ["split", "--down"] : ["new"];
+			const name = params.name ?? (params.split ? undefined : commandName(params.command));
+			if (name) args.push("-n", name);
 			if (params.dir) args.push("-d", params.dir);
 			args.push("--", "sh", "-c", params.command);
 			const { code, out } = await run(args);
@@ -150,7 +163,7 @@ export default function keroBackground(pi: ExtensionAPI) {
 				content: [
 					{
 						type: "text",
-						text: `Started in pane ${pane}. You will be messaged when it ends; end your turn now if there is nothing else to do.`,
+						text: `Started in session ${pane}. You will be messaged when it ends; end your turn now if there is nothing else to do.`,
 					},
 				],
 				details: { pane },
