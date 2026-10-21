@@ -19,6 +19,15 @@ const KERO = process.env.KERO_BIN ?? "kero";
 const TAIL_LINES = 20;
 const TAIL_CHARS = 2000;
 
+/** Prompt section that makes backgrounding the default, not a memorised habit. */
+const DEFAULT_SECTION = `Long work belongs in a Kero pane. A bash call that blocks is a stall: the turn cannot end and nothing else can happen.
+
+- Use kero_bg for anything that may take more than a few seconds: test suites, builds, installs and package managers, docker, database migrations, tarballs, servers and watchers, batch scripts, and any command whose duration you do not know.
+- Prefer a single kero_bg call to splitting one long job across several bash calls.
+- After kero_bg returns, say what is running (pane id and command) in one line, then end the turn. Do not sleep, poll, re-read the pane, or call kero wait: the job's exit status and last screen arrive as a message that starts your next turn.
+- Use bash only for commands you expect to take seconds: reads, greps, git status and commits, formatters, short scripts.
+- Use kero_watch when the work already runs in a pane you did not start; mode "agent" fires when that agent stops working even if its own job keeps running.`;
+
 interface RunResult {
 	code: number | null;
 	out: string;
@@ -97,6 +106,10 @@ export default function keroBackground(pi: ExtensionAPI) {
 		});
 	}
 
+	pi.on("before_agent_start", (event) => {
+		event.systemPromptOptions.sections.kero_background = DEFAULT_SECTION;
+	});
+
 	pi.on("session_shutdown", () => {
 		for (const stop of watching.values()) stop();
 		watching.clear();
@@ -107,6 +120,10 @@ export default function keroBackground(pi: ExtensionAPI) {
 		label: "Kero Background Job",
 		description:
 			"Run a shell command in a background Kero pane and return at once. When the command exits you are sent a message with its exit status and last screen, so you can end your turn now and continue then.",
+		promptSnippet: "Run a long command in a Kero pane; you are messaged when it ends",
+		promptGuidelines: [
+			"Use kero_bg instead of bash for builds, tests, installs, migrations, servers, and any command of unknown duration; then end the turn instead of waiting.",
+		],
 		parameters: Type.Object({
 			command: Type.String({ description: "Shell command to run" }),
 			name: Type.Optional(Type.String({ description: "Session name (with session=true)" })),
@@ -146,6 +163,9 @@ export default function keroBackground(pi: ExtensionAPI) {
 		label: "Kero Watch",
 		description:
 			"Watch a Kero pane you did not start and return at once; you are messaged when it ends. mode=exit waits for the pane's command to end and reports its status; mode=agent waits until the agent running there stops working, even if a process it started keeps running.",
+		promptGuidelines: [
+			"Use kero_watch, not a polling loop, to learn when a pane started elsewhere (another agent, a server) finishes.",
+		],
 		parameters: Type.Object({
 			pane: Type.String({ description: "Pane or session id (a prefix works) or session name" }),
 			mode: Type.Optional(Type.String({ description: '"exit" (default) or "agent"' })),

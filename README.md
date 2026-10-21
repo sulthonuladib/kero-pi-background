@@ -31,6 +31,15 @@ pi -e git:github.com/sulthonuladib/kero-pi-background
 
 Run `/reload` in an open session to pick it up. It does nothing outside Kero (guarded by `KERO_SESSION`).
 
+## Make it the default
+
+Tools are chosen by the model, so the default has to live in the prompt. The extension adds a `kero_background` system-prompt section on every run and guidelines next to the tools:
+
+> Long work belongs in a Kero pane. A bash call that blocks is a stall…
+> Use `kero_bg` for tests, builds, installs, migrations, servers, and any command whose duration you do not know. After it returns, say what is running and end the turn. Do not sleep, poll, re-read the pane, or call `kero wait`.
+
+That is the whole mechanism — no wrapper around `bash`, no interception. `bash` still runs short commands; the model stops reaching for it on long ones.
+
 ## Tools
 
 ### `kero_bg`
