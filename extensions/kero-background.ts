@@ -77,7 +77,13 @@ export default function keroBackground(pi: ExtensionAPI) {
 
 	const watching = new Map<string, () => void>();
 
-	function watch(pane: string, label: string, mode: "exit" | "agent", timeout: string) {
+	function watch(
+		pane: string,
+		label: string,
+		mode: "exit" | "agent",
+		timeout: string,
+		noun: "session" | "pane" = "pane",
+	) {
 		if (watching.has(pane)) return;
 		const args =
 			mode === "agent"
@@ -106,7 +112,7 @@ export default function keroBackground(pi: ExtensionAPI) {
 					customType: "kero-background",
 					display: true,
 					content: [
-						`Background job in pane ${pane} ${outcome}: ${label}${why}`,
+						`Background job in ${noun} ${pane} ${outcome}: ${label}${why}`,
 						body ? `\nLast screen:\n\`\`\`\n${body}\n\`\`\`` : "",
 						`\nRead more with: kero read ${pane} -a`,
 					].join(""),
@@ -158,7 +164,7 @@ export default function keroBackground(pi: ExtensionAPI) {
 			if (code !== 0 || !pane) {
 				throw new Error(`kero ${args[0]} failed (${code}): ${out.trim()}`);
 			}
-			watch(pane, params.command, "exit", params.timeout ?? "24h");
+			watch(pane, params.command, "exit", params.timeout ?? "24h", params.split ? "pane" : "session");
 			return {
 				content: [
 					{
