@@ -33,6 +33,23 @@ Run `/reload` in an open session to pick it up. It does nothing outside Kero (gu
 
 That last step is the whole point: the session that did the work is closed as soon as the agent has recognised its result, so finished jobs do not pile up.
 
+## Remembering what you spawned
+
+The completion line names a session, but the agent should not have to hold that in its head. Every `kero_bg` call is recorded in a registry per Pi session (`~/.local/state/kero-pi-background/jobs-<pi-session>.json`), and each job's `EXIT` trap drops a marker beside it (`<session>.exit`, holding the status and time).
+
+Two things read that registry:
+
+- **`kero_jobs`** lists every job this Pi session started, with its state — `running`, `finished (exit N), still open`, or `closed`. `close="finished"` closes every job that has ended, `close=<session>` closes one. `closed` is the acknowledgement: the agent read it and let it go.
+- **The prompt section** shows the live ones on every turn, so the list survives compaction and a new turn does not have to remember:
+
+  ```text
+  Background jobs this Pi session started:
+  - k3f9a pnpm test — finished (exit 0), still open
+  - k2a8b npm install — running
+  ```
+
+That is the answer to "which one acknowledged?": the one whose session is closed. The agent reads a finished job, then closes it — with `kero close <session>` or `kero_jobs close="finished"`.
+
 ## Tools
 
 ### `kero_bg`
@@ -60,6 +77,16 @@ Watch a pane you did not start — another agent, a dev server, something spawne
 The watcher is a session too: it runs `kero wait`, sends the same one-line message to Pi, and closes itself, so there is nothing left behind.
 
 `mode: "agent"` is the "agent finished while its long job still runs" case: Kero's status comes from the agent's OSC 7501 reports (`kero report`), not from the process tree. For that to work the agent in the pane needs Kero's hook (`kero skill setup`).
+
+### `kero_jobs`
+
+The tracked view of every job this Pi session started with `kero_bg`.
+
+| Param | Meaning |
+| --- | --- |
+| `close` | Session id (a prefix works) to close, or `"finished"` to close every job whose command has ended |
+
+States: `running`, `finished (exit N), still open`, `closed`. One line per job, with the `kero read` command for the ones waiting to be read.
 
 ## The bash gate
 
@@ -91,7 +118,8 @@ The status is the command's own — a failed build reports its exit code. The wa
 
 - The wake-up is a message typed into Pi's terminal pane, so Pi has to be running in Kero (`KERO_PANE`). If that pane is gone, the send has nowhere to land and the job's session still holds its output for a manual `kero read`.
 - Typed input is typed input: if you have a draft in Pi's compose box when the job ends, the completion line joins it. That is the price of a real push between two terminal programs.
-- A job's session is left open after its message, because `kero read` needs the scrollback; the message tells the agent to close it. Watcher sessions close themselves.
+- A job's session is left open after its message, because `kero read` needs the scrollback; the message and the prompt section both say to close it, and `kero_jobs` is how the agent reconciles which is which.
+- The registry lives in `~/.local/state/kero-pi-background` (`KERO_BG_STATE_DIR` overrides it) and is scoped by `PI_SESSION_ID`, so two Pi sessions in the same project do not confuse their jobs.
 - Quitting Pi closes its pane, so completions that arrive afterwards cannot wake anything.
 
 ## License

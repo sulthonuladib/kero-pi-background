@@ -8,6 +8,9 @@
  * anywhere: the command finishes when it finishes.
  */
 import { spawn } from "node:child_process";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -16,6 +19,17 @@ const KERO = process.env.KERO_BIN ?? "kero";
 const PI_TARGET = process.env.KERO_PANE ?? process.env.KERO_SESSION;
 /** Guard against a kero call hanging, not a limit on the job. */
 const CALL_LIMIT_MS = 15_000;
+
+/**
+ * The jobs this Pi session started live in one file per Pi session, so the
+ * agent does not depend on remembering a tool result: the completion message
+ * names a session, and kero_jobs reconciles it against this list. Each job's
+ * EXIT trap also drops a marker with its status next to the file.
+ */
+const STATE_DIR =
+	process.env.KERO_BG_STATE_DIR ??
+	join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local/state"), "kero-pi-background");
+const JOBS_FILE = join(STATE_DIR, `jobs-${(process.env.PI_SESSION_ID ?? "default").replace(/[^\w.-]/g, "_")}.json`);
 
 /** Refuse stock long work in bash, where it would stall the turn. */
 const BASH_GATE = process.env.KERO_BG_BASH_GATE !== "off";
@@ -45,6 +59,7 @@ const DEFAULT_SECTION = `Long work belongs in a Kero session of its own, not in 
 - kero_bg always starts a new session in the current project. There is no split and no timeout to set: the command finishes when it finishes.
 - After kero_bg returns, say what is running (session id and command) in one line, then end the turn. Do not sleep, poll, read the screen, or call kero wait: the session itself messages you when the command ends, and that message starts your next turn.
 - When that message arrives, read the session with kero read <session> -a, then close it with kero close <session>.
+- You do not have to remember what you started: kero_jobs lists every job this Pi session spawned, with its state, and can close the finished ones (close="finished"). Use it when a completion message arrives or when unsure what is still running.
 - A bash call that is stock long work (installs, builds, clones, downloads, test suites) is refused and handed back to you with this instruction.
 - Use bash only for commands you expect to take seconds: reads, greps, git status and commits, formatters, short scripts.
 - Use kero_watch when the work already runs in a pane you did not start; mode "agent" fires when that agent stops working even if its own job keeps running.`;
@@ -122,18 +137,95 @@ async function currentDir(): Promise<string | undefined> {
 	return status?.dir;
 }
 
+interface Job {
+	id: string;
+	name?: string;
+	command: string;
+	dir: string;
+	project?: string;
+	started: number;
+}
+
+function loadJobs(): Job[] {
+	try {
+		const jobs = JSON.parse(readFileSync(JOBS_FILE, "utf8")) as unknown;
+		return Array.isArray(jobs) ? (jobs as Job[]) : [];
+	} catch {
+		return [];
+	}
+}
+
+function saveJobs(jobs: Job[]) {
+	try {
+		mkdirSync(STATE_DIR, { recursive: true });
+		writeFileSync(JOBS_FILE, `${JSON.stringify(jobs.slice(-50), null, "\t")}\n`);
+	} catch {
+		// a read-only state dir must not stop a job from running
+	}
+}
+
+/** The status the job's EXIT trap recorded, if the command has ended. */
+function exitOf(id: string): { code: number; at: number } | undefined {
+	try {
+		const [code, at] = readFileSync(join(STATE_DIR, `${id}.exit`), "utf8").trim().split(/\s+/);
+		const value = Number(code);
+		return Number.isFinite(value) ? { code: value, at: Number(at) * 1000 } : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+interface JobView {
+	job: Job;
+	open: boolean;
+	exit?: { code: number; at: number };
+}
+
+async function viewOf(job: Job): Promise<JobView> {
+	const open = (await run(["status", job.id, "--json"])).code === 0;
+	return { job, open, exit: exitOf(job.id) };
+}
+
+/** `closed` is the acknowledgement: the agent closed the session it read. */
+function stateOf(view: JobView): string {
+	if (!view.open) return "closed";
+	return view.exit ? `finished (exit ${view.exit.code}), still open` : "running";
+}
+
+/** A line per live job, shown in the prompt so the list survives compaction. */
+async function openJobsSection(): Promise<string | undefined> {
+	const jobs = loadJobs();
+	if (jobs.length === 0) return undefined;
+	const rows: string[] = [];
+	for (const job of jobs.slice(-10)) {
+		const view = await viewOf(job);
+		if (!view.open) continue;
+		const name = (job.name ?? job.command).split("\n")[0]!.slice(0, 60);
+		rows.push(`- ${job.id} ${name} — ${stateOf(view)}`);
+	}
+	if (rows.length === 0) return undefined;
+	return `Background jobs this Pi session started:\n${rows.join("\n")}\nRead a finished one with kero read <session> -a and close it with kero close <session>, or run kero_jobs.`;
+}
+
+/** The body of a double-quoted shell word, with `$var` left for the shell. */
+function dqBody(text: string): string {
+	return text.replace(/[\\"$`]/g, (c) => `\\${c}`);
+}
+
 /**
  * Shell lines the job runs when its command ends: record the status, type a
  * one-line message into Pi's pane, and exit with the command's status. The
  * trap means a command that calls `exit` itself still reports. Pi needs no
  * watcher, because the message arrives as typed input.
  */
-function announce(subject: string): string {
+function announce(subject: string, stateDir: string): string {
 	if (!PI_TARGET) return "";
+	const marker = `"${dqBody(`${stateDir}/`)}$KERO_SESSION.exit"`;
 	return [
 		"done_with_job() {",
 		"\trc=$?",
 		"\ttrap - EXIT",
+		`\tprintf '%s %s' "$rc" "$(date +%s)" > ${marker}`,
 		`\tlabel=${shq(subject)}`,
 		`\tkero send ${shq(PI_TARGET)} --enter "kero-pi-background: $label ($KERO_SESSION) exited $rc; kero read $KERO_SESSION -a; kero close $KERO_SESSION"`,
 		"\texit $rc",
@@ -145,8 +237,9 @@ function announce(subject: string): string {
 export default function keroBackground(pi: ExtensionAPI) {
 	if (!process.env.KERO_SESSION) return; // only inside Kero
 
-	pi.on("before_agent_start", (event) => {
-		event.systemPromptOptions.sections.kero_background = DEFAULT_SECTION;
+	pi.on("before_agent_start", async (event) => {
+		const jobs = await openJobsSection();
+		event.systemPromptOptions.sections.kero_background = jobs ? `${DEFAULT_SECTION}\n\n${jobs}` : DEFAULT_SECTION;
 	});
 
 	// A long command in bash is Pi standing still while something loads. Refuse
@@ -181,7 +274,12 @@ export default function keroBackground(pi: ExtensionAPI) {
 			const dir = params.dir ?? (await currentDir()) ?? process.cwd();
 			const project = await projectFor(dir);
 			const name = params.name ?? commandName(params.command);
-			const script = [announce(name ?? "job"), params.command].filter(Boolean).join("\n");
+			const script = [announce(name ?? "job", STATE_DIR), params.command].filter(Boolean).join("\n");
+			try {
+				mkdirSync(STATE_DIR, { recursive: true }); // the job's EXIT trap writes its status here
+			} catch {
+				// the job still runs; kero_jobs will just see it as running until it is closed
+			}
 			const args = ["new"];
 			if (project) args.push("-p", project.id);
 			if (name) args.push("-n", name);
@@ -191,12 +289,21 @@ export default function keroBackground(pi: ExtensionAPI) {
 			if (code !== 0 || !pane) {
 				throw new Error(`kero new failed (${code}): ${out.trim()}`);
 			}
+			saveJobs([
+				...loadJobs().filter((job) => job.id !== pane),
+				{ id: pane, name, command: params.command, dir, project: project?.name, started: Date.now() },
+			]);
 			const where = project ? ` in project ${project.name}` : "";
 			const how = PI_TARGET
 				? "Its session messages you when the command ends; end the turn and do something else."
 				: "No Pi pane to message, so check it yourself with `kero read`.";
 			return {
-				content: [{ type: "text", text: `Started in session ${pane}${where}. ${how}` }],
+				content: [
+					{
+						type: "text",
+						text: `Started in session ${pane}${where}, tracked by kero_jobs. ${how}`,
+					},
+				],
 				details: { pane, project: project?.name },
 			};
 		},
@@ -246,6 +353,44 @@ export default function keroBackground(pi: ExtensionAPI) {
 				content: [{ type: "text", text: `Watching ${params.pane} in session ${pane}; you will be messaged when it ${what}.` }],
 				details: { pane: params.pane, watcher: pane, mode },
 			};
+		},
+	});
+
+	pi.registerTool({
+		name: "kero_jobs",
+		label: "Kero Jobs",
+		description:
+			"List the background jobs this Pi session started with kero_bg, with each one's state: running, finished with an exit status but still open, or closed. Optionally close a session, or every finished one.",
+		promptSnippet: "List this session's background jobs; close the ones you are done with",
+		promptGuidelines: [
+			'Run kero_jobs when a completion message arrives or when unsure what is still running; close finished sessions with close="finished".',
+		],
+		parameters: Type.Object({
+			close: Type.Optional(
+				Type.String({
+					description: 'Session id (a prefix works) to close, or "finished" to close every job whose command has ended',
+				}),
+			),
+		}),
+		async execute(_id, params) {
+			const close = params.close;
+			if (close) {
+				const targets = (await Promise.all(loadJobs().map(viewOf))).filter((view) =>
+					close === "finished" ? view.open && view.exit : view.open && view.job.id.startsWith(close),
+				);
+				for (const view of targets) await run(["close", view.job.id]);
+			}
+			const views = await Promise.all(loadJobs().map(viewOf));
+			const text = views.length
+				? views
+						.map((view) => {
+							const name = (view.job.name ?? view.job.command).split("\n")[0]!.slice(0, 60);
+							const read = view.open && view.exit ? `\tread: kero read ${view.job.id} -a` : "";
+							return `${view.job.id}\t${name}\t${stateOf(view)}${read}`;
+						})
+						.join("\n")
+				: "No background jobs started by this session.";
+			return { content: [{ type: "text", text }] };
 		},
 	});
 }
