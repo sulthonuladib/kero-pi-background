@@ -1,6 +1,6 @@
 {
   "name": "kero-pi-background",
-  "version": "0.1.1",
+  "version": "0.3.0",
   "description": "Run long jobs in Kero panes from Pi and get woken by a message when they finish, instead of blocking a turn on kero wait.",
   "keywords": [
     "pi-package",

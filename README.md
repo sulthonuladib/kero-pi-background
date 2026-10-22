@@ -1,24 +1,17 @@
 # kero-pi-background
 
-A [Pi](https://pi.dev) extension that runs jobs in [Kero](https://kero.sh) ([egoist/kero](https://github.com/egoist/kero)) panes and **wakes the agent with a message when they finish**, instead of holding a turn open on `kero wait`.
+A [Pi](https://pi.dev) extension that runs long jobs in [Kero](https://kero.sh) ([egoist/kero](https://github.com/egoist/kero)) sessions and lets **the session tell Pi when it is done** — by typing a line into Pi's terminal pane. Pi never watches the job, never holds a turn open, and there is no timeout: the command finishes when it finishes.
 
 ```text
-kero_bg {command: "pnpm test"}      → "Started in session k3f9a. End your turn."
-                                      … agent stops …
-                                      [kero-background] pane k3f9a succeeded
-                                      Last screen: 42 passed
+kero_bg {command: "pnpm test"}  → "Started in session k3f9a…"     … agent ends its turn …
+                                  kero-pi-background: pnpm (k3f9a) exited 0; kero read k3f9a -a; kero close k3f9a
 ```
 
 ## Why
 
-`kero wait` blocks the process that calls it, so an agent that uses it just stalls — it cannot stop, and it cannot do anything else either. Kero has no push channel into a running agent, but Pi does: `pi.sendMessage(..., { triggerTurn: true })`.
+A `bash` call holds the turn for exactly as long as the command runs, so a download or a build means Pi standing still with nothing to do. A `timeout` on top does not fix that — it is the same stall with a number attached, and if the command is quicker than the timeout, the timeout was never the point.
 
-So the waiting is moved into a detached child process. The tool returns immediately, the turn ends, and the result arrives later as a message that starts a new turn:
-
-- Pi idle → the message starts a run.
-- Pi still working → `deliverAs: "followUp"` queues it, so it never interrupts.
-
-No polling, no blocked turn, one sleeping pid per job.
+Kero and Pi both live in terminals, so they can simply talk. The job's own session runs `kero send <pi-pane> --enter …` when the command ends. Pi receives it as typed input, starts a turn, reads the session, and closes it. No watcher process in Pi, no polling, no polling loop, no timeout.
 
 ## Install
 
@@ -31,66 +24,75 @@ pi -e git:github.com/sulthonuladib/kero-pi-background
 
 Run `/reload` in an open session to pick it up. It does nothing outside Kero (guarded by `KERO_SESSION`).
 
-## Make it the default
+## The round trip
 
-Tools are chosen by the model, so the default has to live in the prompt. The extension adds a `kero_background` system-prompt section on every run and guidelines next to the tools:
+1. `kero_bg` starts a **new session in the current project**: `kero new -p <project> -n <name> -d <dir> -- sh -c '<job>'`. No split, no pane beside the agent.
+2. The tool returns at once. The turn ends; Pi is free.
+3. When the command ends — even if it calls `exit` itself, because the notification runs from an `EXIT` trap — the session sends one line to Pi's pane with `kero send --enter`, then exits with the command's status.
+4. Pi starts a turn on that line. It names the session and the exit status, and says what to do next: `kero read <session> -a`, then `kero close <session>`.
 
-> Long work belongs in a Kero pane. A bash call that blocks is a stall…
-> Use `kero_bg` for tests, builds, installs, migrations, servers, and any command whose duration you do not know. After it returns, say what is running and end the turn. Do not sleep, poll, re-read the pane, or call `kero wait`.
-> Never cap a background job with a timeout: `kero_bg` watches until the command exits.
-
-That is the whole mechanism — no wrapper around `bash`, no interception. `bash` still runs short commands; the model stops reaching for it on long ones.
+That last step is the whole point: the session that did the work is closed as soon as the agent has recognised its result, so finished jobs do not pile up.
 
 ## Tools
 
 ### `kero_bg`
 
-Start a command in its own background Kero session and return at once. Each job gets a session of its own, so the session you are working in stays one agent doing one thing; pass `split: true` to put a job beside the current pane instead.
+Start a command in a new Kero session in the current project and return at once.
 
 | Param | Meaning |
 | --- | --- |
 | `command` | Shell command to run |
-| `dir` | Working directory (default: current) |
 | `name` | Session name (default: the command's first word, e.g. `pnpm`) |
-| `split` | Run in a pane beside this one instead of its own session |
+| `dir` | Working directory (default: the current session's) |
 
-There is no `timeout`: the job is watched until the command exits, however long that takes. An hour-long build and a three-day server both report when they really end, because a time limit only ever stops you watching a job that is still running.
-
-You are messaged with the exit status and the last 20 lines of the pane when the command ends.
+No `split`, no `timeout`. The job reports itself when it ends, however long that takes.
 
 ### `kero_watch`
 
-Watch a pane you did not start — another agent, a dev server, something you spawned by hand.
+Watch a pane you did not start — another agent, a dev server, something spawned by hand — without watching it yourself.
 
 | Param | Meaning |
 | --- | --- |
 | `pane` | Pane or session id (prefix works) or session name |
 | `mode` | `exit` (default): wait for the pane's command to end. `agent`: wait until the agent there stops working, even if a process it started keeps running |
 | `label` | What you are waiting on, for the message |
-| `timeout` | Stop watching after this long (default `24h`); the job keeps running |
+
+The watcher is a session too: it runs `kero wait`, sends the same one-line message to Pi, and closes itself, so there is nothing left behind.
 
 `mode: "agent"` is the "agent finished while its long job still runs" case: Kero's status comes from the agent's OSC 7501 reports (`kero report`), not from the process tree. For that to work the agent in the pane needs Kero's hook (`kero skill setup`).
+
+## The bash gate
+
+The prompt asks the model to background long work, and the `tool_call` gate makes it stick: stock long commands are refused in `bash`, because there bash would hold the turn while something loads.
+
+| Bash call | Result |
+| --- | --- |
+| installs, builds, clones, downloads, test suites (`npm install`, `cargo build`, `docker build`, `git clone`, `pytest`, `wget`, `curl -O`, …) | blocked, reason points at `kero_bg` |
+| everything else (`ls`, `git status`, `grep`, formatters, short scripts) | runs as usual |
+
+```text
+`npm install` is long work, and bash would hold this turn until it ends.
+Start it with kero_bg instead: it runs in a new Kero session in this project,
+you end the turn and do something else, and the session messages you when the
+command ends.
+```
+
+The block is a tool result the model must read, not a silent drop, so its next call is the right one. `KERO_BG_BASH_GATE=off` turns it off.
 
 ## Message format
 
 ```text
-Background job in pane <id> succeeded: <command>
-
-Last screen:
-```
-<last 20 lines>
+kero-pi-background: <name> (<session>) exited <status>; kero read <session> -a; kero close <session>
 ```
 
-Read more with: kero read <id> -a
-```
-
-A pane that disappears or a job killed by a signal is reported as `lost` / `ended with status N`. If `kero_watch`'s timeout elapses first, the message says the job **is still running** and points at `kero_watch` to resume — it is never reported as an exit status, and it never cuts a job short.
+The status is the command's own — a failed build reports its exit code. The watcher's version names the pane and mode instead (`kero-pi-background: the build exited (2); kero close <watcher>`).
 
 ## Caveats
 
-- The wake-up lives in the Pi process. Quit Pi, close the pane, or reload the extension and pending jobs stop reporting (reload kills watchers on purpose to avoid double delivery).
-- `/reload` reloads extensions and activates newly registered tools in the current session — no restart needed.
-- Exit codes are Kero's: `3` no such target, `4` Kero is not running.
+- The wake-up is a message typed into Pi's terminal pane, so Pi has to be running in Kero (`KERO_PANE`). If that pane is gone, the send has nowhere to land and the job's session still holds its output for a manual `kero read`.
+- Typed input is typed input: if you have a draft in Pi's compose box when the job ends, the completion line joins it. That is the price of a real push between two terminal programs.
+- A job's session is left open after its message, because `kero read` needs the scrollback; the message tells the agent to close it. Watcher sessions close themselves.
+- Quitting Pi closes its pane, so completions that arrive afterwards cannot wake anything.
 
 ## License
 
