@@ -26,6 +26,7 @@ const DEFAULT_SECTION = `Long work belongs in its own Kero session, not in a bas
 - Each job gets its own session, so the current session stays one agent doing one thing. Pass split=true only when you deliberately want the job beside this pane.
 - Prefer a single kero_bg call to splitting one long job across several bash calls.
 - After kero_bg returns, say what is running (session id and command) in one line, then end the turn. Do not sleep, poll, re-read the pane, or call kero wait: the job's exit status and last screen arrive as a message that starts your next turn.
+- Never cap a background job with a timeout. kero_bg watches until the command exits, however long that takes; a timeout only makes you stop watching a job that is still running.
 - Close the session with kero close once you have read what you need from it.
 - Use bash only for commands you expect to take seconds: reads, greps, git status and commits, formatters, short scripts.
 - Use kero_watch when the work already runs in a pane you did not start; mode "agent" fires when that agent stops working even if its own job keeps running.`;
@@ -81,14 +82,13 @@ export default function keroBackground(pi: ExtensionAPI) {
 		pane: string,
 		label: string,
 		mode: "exit" | "agent",
-		timeout: string,
+		timeout?: string,
 		noun: "session" | "pane" = "pane",
 	) {
 		if (watching.has(pane)) return;
 		const args =
-			mode === "agent"
-				? ["wait", pane, "--for", "idle,waiting,error,exited", "--timeout", timeout]
-				: ["wait", pane, "--exit", "--timeout", timeout];
+			mode === "agent" ? ["wait", pane, "--for", "idle,waiting,error,exited"] : ["wait", pane, "--exit"];
+		if (timeout) args.push("--timeout", timeout);
 		const child = spawn(KERO, args, { stdio: ["ignore", "pipe", "pipe"] });
 		let err = "";
 		child.stderr.on("data", (d) => (err += d));
@@ -96,16 +96,21 @@ export default function keroBackground(pi: ExtensionAPI) {
 		child.on("error", () => watching.delete(pane));
 		child.on("close", async (code) => {
 			watching.delete(pane);
+			// kero wait prints "kero: timed out" and exits 1 when its --timeout
+			// elapses. The job is still running, so that is not an exit status.
+			const timedOut = /timed out/i.test(err);
 			const screen = await run(["read", pane, "-n", String(TAIL_LINES)], 5000);
-			const outcome =
-				code === 0
+			const outcome = timedOut
+				? `is still running (stopped watching after ${timeout})`
+				: code === 0
 					? mode === "agent"
 						? "stopped working"
 						: "succeeded"
 					: code === null
 						? "lost"
 						: `ended with status ${code}`;
-			const why = err.trim() ? `\n(kero said: ${err.trim()})` : "";
+			const why = !timedOut && err.trim() ? `\n(kero said: ${err.trim()})` : "";
+			const resume = timedOut ? `\nNot watching any more; call kero_watch on ${pane} to pick it up again.` : "";
 			const body = tail(screen.out);
 			await pi.sendMessage(
 				{
@@ -113,6 +118,7 @@ export default function keroBackground(pi: ExtensionAPI) {
 					display: true,
 					content: [
 						`Background job in ${noun} ${pane} ${outcome}: ${label}${why}`,
+						resume,
 						body ? `\nLast screen:\n\`\`\`\n${body}\n\`\`\`` : "",
 						`\nRead more with: kero read ${pane} -a`,
 					].join(""),
@@ -135,10 +141,11 @@ export default function keroBackground(pi: ExtensionAPI) {
 		name: "kero_bg",
 		label: "Kero Background Job",
 		description:
-			"Run a shell command in its own background Kero session and return at once. When the command exits you are sent a message with its exit status and last screen, so you can end your turn now and continue then.",
+			"Run a shell command in its own background Kero session and return at once. It is watched until the command exits, however long that takes; then you are sent a message with its exit status and last screen, so you can end your turn now and continue then.",
 		promptSnippet: "Run a long command in its own Kero session; you are messaged when it ends",
 		promptGuidelines: [
 			"Use kero_bg instead of bash for builds, tests, installs, migrations, servers, and any command of unknown duration; then end the turn instead of waiting.",
+			"Do not ask kero_bg for a timeout: a long job is watched until it exits, not cut off while it still runs.",
 		],
 		parameters: Type.Object({
 			command: Type.String({ description: "Shell command to run" }),
@@ -148,9 +155,6 @@ export default function keroBackground(pi: ExtensionAPI) {
 				Type.Boolean({
 					description: "Run in a pane beside this one instead of its own session (the default)",
 				}),
-			),
-			timeout: Type.Optional(
-				Type.String({ description: "Stop watching after this long (kero syntax, e.g. 2h); default none" }),
 			),
 		}),
 		async execute(_id, params) {
@@ -164,7 +168,7 @@ export default function keroBackground(pi: ExtensionAPI) {
 			if (code !== 0 || !pane) {
 				throw new Error(`kero ${args[0]} failed (${code}): ${out.trim()}`);
 			}
-			watch(pane, params.command, "exit", params.timeout ?? "24h", params.split ? "pane" : "session");
+			watch(pane, params.command, "exit", undefined, params.split ? "pane" : "session");
 			return {
 				content: [
 					{
@@ -189,7 +193,9 @@ export default function keroBackground(pi: ExtensionAPI) {
 			pane: Type.String({ description: "Pane or session id (a prefix works) or session name" }),
 			mode: Type.Optional(Type.String({ description: '"exit" (default) or "agent"' })),
 			label: Type.Optional(Type.String({ description: "What you are waiting on, for the message" })),
-			timeout: Type.Optional(Type.String({ description: "Stop watching after this long (e.g. 2h)" })),
+			timeout: Type.Optional(
+				Type.String({ description: "Stop watching after this long, kero syntax (default 24h); the job keeps running" }),
+			),
 		}),
 		async execute(_id, params) {
 			const status = await run(["status", params.pane, "--json"]);

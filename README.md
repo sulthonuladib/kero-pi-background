@@ -37,6 +37,7 @@ Tools are chosen by the model, so the default has to live in the prompt. The ext
 
 > Long work belongs in a Kero pane. A bash call that blocks is a stall…
 > Use `kero_bg` for tests, builds, installs, migrations, servers, and any command whose duration you do not know. After it returns, say what is running and end the turn. Do not sleep, poll, re-read the pane, or call `kero wait`.
+> Never cap a background job with a timeout: `kero_bg` watches until the command exits.
 
 That is the whole mechanism — no wrapper around `bash`, no interception. `bash` still runs short commands; the model stops reaching for it on long ones.
 
@@ -52,7 +53,8 @@ Start a command in its own background Kero session and return at once. Each job 
 | `dir` | Working directory (default: current) |
 | `name` | Session name (default: the command's first word, e.g. `pnpm`) |
 | `split` | Run in a pane beside this one instead of its own session |
-| `timeout` | Stop watching after this long, Kero syntax (default `24h`) |
+
+There is no `timeout`: the job is watched until the command exits, however long that takes. An hour-long build and a three-day server both report when they really end, because a time limit only ever stops you watching a job that is still running.
 
 You are messaged with the exit status and the last 20 lines of the pane when the command ends.
 
@@ -65,7 +67,7 @@ Watch a pane you did not start — another agent, a dev server, something you sp
 | `pane` | Pane or session id (prefix works) or session name |
 | `mode` | `exit` (default): wait for the pane's command to end. `agent`: wait until the agent there stops working, even if a process it started keeps running |
 | `label` | What you are waiting on, for the message |
-| `timeout` | Stop watching after this long (default `24h`) |
+| `timeout` | Stop watching after this long (default `24h`); the job keeps running |
 
 `mode: "agent"` is the "agent finished while its long job still runs" case: Kero's status comes from the agent's OSC 7501 reports (`kero report`), not from the process tree. For that to work the agent in the pane needs Kero's hook (`kero skill setup`).
 
@@ -82,7 +84,7 @@ Last screen:
 Read more with: kero read <id> -a
 ```
 
-A pane that disappears or a job killed by a signal is reported as `lost` / `ended with status N`.
+A pane that disappears or a job killed by a signal is reported as `lost` / `ended with status N`. If `kero_watch`'s timeout elapses first, the message says the job **is still running** and points at `kero_watch` to resume — it is never reported as an exit status, and it never cuts a job short.
 
 ## Caveats
 
